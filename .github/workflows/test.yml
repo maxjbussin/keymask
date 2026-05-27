@@ -1,0 +1,46 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Verify script is executable
+        run: |
+          chmod +x ./keymask
+          ls -la ./keymask
+
+      - name: Syntax check
+        run: python3 -c "import ast; ast.parse(open('./keymask').read())"
+
+      - name: Run pattern tests
+        run: ./tests/test_patterns.sh
+
+      - name: Smoke test (positive)
+        run: |
+          OUTPUT=$(echo "API_KEY=sk-or-v1-FAKEabc1234567890fakedef1234567890abc" | ./keymask)
+          echo "$OUTPUT" | grep -q "REDACTED" || (echo "FAIL: smoke test did not redact"; exit 1)
+          echo "PASS"
+
+      - name: Smoke test (negative)
+        run: |
+          OUTPUT=$(echo "no secrets here just plain text" | ./keymask)
+          [ "$OUTPUT" = "no secrets here just plain text" ] || (echo "FAIL: false positive"; exit 1)
+          echo "PASS"
