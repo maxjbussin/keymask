@@ -1,5 +1,7 @@
 # keymask
 
+[![tests](https://github.com/maxjbussin/keymask/actions/workflows/test.yml/badge.svg)](https://github.com/maxjbussin/keymask/actions/workflows/test.yml)
+
 Tool for vibe-coders so you're not spilling your API keys every time you copy a giant chunk of code over. I aint reading allat.
 
 ```bash
