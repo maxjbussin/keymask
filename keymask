@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""
+keymask - strip secrets from stdin, write redacted text to stdout.
+
+Detects and redacts API keys, tokens, and credentials from terminal output
+so they don't leak into chats, logs, screenshots, or pastebins.
+
+Usage:
+  pbpaste | keymask | pbcopy      # sanitize clipboard in place
+  cat file.log | keymask          # one-off
+  keymask -n < file.log           # dry-run, show counts only
+  tail -f app.log | keymask -f    # live stream (line-buffered)
+
+Supports: Anthropic, OpenAI, OpenRouter, xAI, Stripe, GitHub, GitLab,
+GoogleOAuth, AWS, Twilio, Telegram, ngrok, ElevenLabs, JWTs, Slack,
+Bearer tokens, PEM blocks, and generic *_KEY/*_SECRET/*_TOKEN env vars.
+
+License: MIT
+"""
+import re
+import sys
+from collections import Counter
+
+# (pattern, category) - order matters: most specific first.
+# After a match is replaced with [REDACTED:...], later patterns can't re-match it.
+PATTERNS = [
+    # Multi-line PEM blocks (RSA, EC, certificates, etc.)
+    (re.compile(
+        r'-----BEGIN [A-Z ]+(?:PRIVATE KEY|CERTIFICATE)-----'
+        r'[\s\S]+?'
+        r'-----END [A-Z ]+(?:PRIVATE KEY|CERTIFICATE)-----'
+    ), 'PEM'),
+
+    # Anthropic API keys
+    (re.compile(r'sk-ant-[A-Za-z0-9_-]{20,}'), 'Anthropic'),
+
+    # OpenRouter
+    (re.compile(r'sk-or-v\d-[A-Za-z0-9]{20,}'), 'OpenRouter'),
+
+    # OpenAI - project, service-account, and legacy forms
+    (re.compile(r'sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}'), 'OpenAI'),
+    (re.compile(r'\bsk-[A-Za-z0-9]{40,}\b'), 'OpenAI'),
+
+    # xAI
+    (re.compile(r'\bxai-[A-Za-z0-9]{20,}\b'), 'xAI'),
+
+    # Stripe live/test keys
+    (re.compile(r'\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{20,}\b'), 'Stripe'),
+
+    # GitHub PATs and OAuth tokens (ghp_, gho_, ghu_, ghs_, ghr_)
+    (re.compile(r'\bgh[pousr]_[A-Za-z0-9]{30,}\b'), 'GitHub'),
+
+    # GitLab PAT
+    (re.compile(r'\bglpat-[A-Za-z0-9_-]{20}\b'), 'GitLab'),
+
+    # Google OAuth access tokens
+    (re.compile(r'\bya29\.[A-Za-z0-9_-]{20,}\b'), 'GoogleOAuth'),
+
+    # AWS access key ID (and matching secret usually nearby - flag separately)
+    (re.compile(r'\bAKIA[0-9A-Z]{16}\b'), 'AWS-AccessKey'),
+    (re.compile(r'\bASIA[0-9A-Z]{16}\b'), 'AWS-TempKey'),
+
+    # Twilio
+    (re.compile(r'\bAC[a-f0-9]{32}\b'), 'TwilioSID'),
+    (re.compile(r'\bSK[a-f0-9]{32}\b'), 'TwilioKey'),
+
+    # Telegram bot tokens - distinctive shape: digits:base64ish
+    (re.compile(r'\b\d{8,10}:[A-Za-z0-9_-]{35,}\b'), 'TelegramBot'),
+
+    # ngrok authtoken
+    (re.compile(r'\b2[A-Za-z0-9]{23,25}_[A-Za-z0-9]{30,}\b'), 'ngrok'),
+
+    # ElevenLabs (32-char hex)
+    (re.compile(r'\bsk_[a-f0-9]{40,}\b'), 'ElevenLabs'),
+
+    # JWTs - 3 base64url segments starting with eyJ
+    (re.compile(
+        r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+    ), 'JWT'),
+
+    # Authorization header bearer tokens - preserve the "Authorization: Bearer " prefix
+    (re.compile(r'(?i)(Authorization:\s*Bearer\s+)([A-Za-z0-9._\-+/=]{20,})'),
+     'BearerHeader'),
+
+    # Slack tokens
+    (re.compile(r'\bxox[abprs]-[A-Za-z0-9-]{10,}\b'), 'Slack'),
+
+    # Generic: secret-shaped env vars (VAR_NAME containing TOKEN/KEY/SECRET/etc)
+    # Preserves "VAR_NAME=" so you can see which key got hit.
+    (re.compile(
+        r'(?im)^(\s*(?:export\s+)?'
+        r'[A-Z][A-Z0-9_]*'
+        r'(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD|PWD|API|AUTH|CRED|PRIVATE)'
+        r'[A-Z0-9_]*\s*[:=]\s*)'
+        r'["\']?([^\s"\']{8,})["\']?'
+    ), 'EnvVar'),
+]
+
+
+def redact(text):
+    counts = Counter()
+
+    for pattern, category in PATTERNS:
+        def replace(m, _cat=category):
+            counts[_cat] += 1
+            # If the pattern has a captured prefix (Bearer, env var), keep it
+            if m.groups():
+                return m.group(1) + f'[REDACTED:{_cat}]'
+            return f'[REDACTED:{_cat}]'
+        text = pattern.sub(replace, text)
+
+    return text, counts
+
+
+def main():
+    dry_run = '-n' in sys.argv or '--dry-run' in sys.argv
+    stream = '-f' in sys.argv or '--follow' in sys.argv
+
+    if stream:
+        # Line-by-line for tail -f, journalctl -f, etc.
+        try:
+            for line in sys.stdin:
+                redacted, _ = redact(line)
+                if not dry_run:
+                    sys.stdout.write(redacted)
+                    sys.stdout.flush()
+        except (KeyboardInterrupt, BrokenPipeError):
+            pass
+        return
+
+    text = sys.stdin.read()
+    redacted, counts = redact(text)
+
+    if not dry_run:
+        sys.stdout.write(redacted)
+
+    # Summary on stderr - doesn't pollute piped output
+    if counts:
+        summary = ', '.join(f'{c}={n}' for c, n in sorted(counts.items()))
+        total = sum(counts.values())
+        verb = 'would redact' if dry_run else 'redacted'
+        print(f'[keymask] {verb} {total}: {summary}', file=sys.stderr)
+    else:
+        print('[keymask] no secrets detected', file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()

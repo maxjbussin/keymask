@@ -1,0 +1,26 @@
+# Backups
+*.bak
+*.bak.*
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+
+# Never commit secrets
+.env
+.env.local
+.env.*.local
